@@ -1,4 +1,4 @@
-"""Shared terminal/CLI operations; no duplicated scheduling logic."""
+"""Shared operations for the interactive menu and CLI."""
 
 import asyncio
 import os
@@ -8,16 +8,16 @@ import subprocess
 import tempfile
 import time
 
-from .config import AutoCDError, FILENAME, atomic_write, parse, read, render
+from .config import AutoCDError, FILENAME, atomic_write, parse, read, render, validate_repository
 from .discovery import discover
 from .git import git, remote_sha
 from .paths import project_id
 from .process import check_bash
-from .runner import enqueue_manual, interruptible, open_state, recover_if_idle, set_enabled, tick, worker
+from .runner import enqueue_manual, interruptible, recover_if_idle, set_enabled, tick, worker
 from .scheduler import clock, from_project
 from .service import installed, kick, overview, sync_project
+from .state import State
 from . import ui
-from .ui import prompt, terminal_text  # noqa: F401 -- compatibility for CLI callers
 
 
 def call(paths, action, **payload):
@@ -28,7 +28,7 @@ def call(paths, action, **payload):
     if action in {"tick", "run-once"}:
         results = asyncio.run(interruptible(tick(paths, payload.get("path"))))
         for item in results:
-            with open_state(paths) as state:
+            with State.open(paths) as state:
                 row = state.project(item["project_id"])
             sync_project(paths, row)
         if action == "run-once":
@@ -40,10 +40,10 @@ def call(paths, action, **payload):
         if not payload.get("queue_only"):
             if not kick(paths):
                 asyncio.run(interruptible(worker(paths)))
-        with open_state(paths) as state:
+        with State.open(paths) as state:
             result.update(status=state.job(result["job_id"])["status"])
         return result
-    with open_state(paths) as state:
+    with State.open(paths) as state:
         recover_if_idle(state, paths)
         if action == "history":
             return state.history(project_id(payload["path"]) if payload.get("path") else None)
@@ -65,7 +65,7 @@ def call(paths, action, **payload):
 
 def wake_worker(paths):
     if installed(paths):
-        with open_state(paths) as state:
+        with State.open(paths) as state:
             queued = bool(state.queued())
         if queued:
             kick(paths)
@@ -75,7 +75,7 @@ def status(paths):
     schedule = overview(paths)
     if not paths.database.exists():
         return [], schedule
-    with open_state(paths) as state:
+    with State.open(paths) as state:
         recover_if_idle(state, paths)
         rows = state.all()
     for row in rows:
@@ -112,7 +112,7 @@ PHASES = dict(paused="已暂停", monitoring="等待观察", cooling="冷静中"
               deploying="部署中", current="已是最新", failed="失败待重试", unknown="需人工核实", error="观察异常")
 
 
-def project_lines(row, schedule, index=None):
+def project_lines(row, index=None):
     phase = "配置错误" if row.get("error") else PHASES.get(row["phase"], row["phase"])
     tone = ("error" if row.get("error") or row["phase"] in {"failed", "error", "unknown"}
             else "success" if row["phase"] == "current"
@@ -148,7 +148,7 @@ def show_rows(rows, schedule, *, interactive=False):
     for index, row in enumerate(rows, 1):
         if lines:
             lines.append("")
-        lines.extend(project_lines(row, schedule, index))
+        lines.extend(project_lines(row, index))
     ui.panel(f"项目 · {len(rows)}", lines)
 
 
@@ -189,7 +189,6 @@ async def defaults(project):
     try:
         repository = await git("remote", "get-url", "origin", cwd=project)
         branch = await git("symbolic-ref", "--short", "HEAD", cwd=project)
-        from .config import validate_repository
         validate_repository(repository)
     except AutoCDError:
         repository = ""
@@ -204,15 +203,15 @@ def wizard(project, edit=False):
     repo, branch = asyncio.run(defaults(project)) if not old else (old.repository, old.branch)
     try:
         script = render(
-            prompt("仓库地址", repo), prompt("监视分支", branch),
-            float(prompt("监视间隔（分钟）", old.interval_minutes if old else 1)),
-            float(prompt("冷静间隔（分钟）", old.cooldown_minutes if old else 5)),
-            float(prompt("部署超时（分钟）", old.timeout_minutes if old else 15)),
+            ui.prompt("仓库地址", repo), ui.prompt("监视分支", branch),
+            float(ui.prompt("监视间隔（分钟）", old.interval_minutes if old else 1)),
+            float(ui.prompt("冷静间隔（分钟）", old.cooldown_minutes if old else 5)),
+            float(ui.prompt("部署超时（分钟）", old.timeout_minutes if old else 15)),
             **({"body": old.body} if old else {}),
         )
     except (ValueError, TypeError) as exc:
         raise AutoCDError("请输入有效的分钟数。") from exc
-    if not edit or prompt("打开编辑器填写部署命令？y/N", "n").lower() == "y":
+    if not edit or ui.prompt("打开编辑器填写部署命令？y/N", "n").lower() == "y":
         script = edit_in_editor(script)
     path = save_config(project, script, expect=old.fingerprint if old else None, create=not edit)
     ui.notice(f"已保存 {path}", "success")

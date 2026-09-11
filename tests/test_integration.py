@@ -7,6 +7,7 @@ import unittest
 
 from support import OneShot, Repository, eventually, git
 from autocd.config import AutoCDError
+from autocd.locks import file_lock
 
 
 class DeploymentTests(unittest.IsolatedAsyncioTestCase):
@@ -196,6 +197,8 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
         process.kill()
         await process.wait()
         try:
+            with file_lock(self.client.paths.home / "run/daemon.lock") as legacy_lock:
+                self.assertIsNone(legacy_lock)
             self.assertTrue((await self.worker())["busy"])
             self.assertEqual((await self.client.row(repo))["phase"], "deploying")
         finally:

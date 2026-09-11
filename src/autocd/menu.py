@@ -23,7 +23,7 @@ def project_menu(paths, row):
                 ui.pause()
                 return
             print()
-            ui.panel("项目管理", project_lines(row, online))
+            ui.panel("项目管理", project_lines(row))
             if not online["active"]:
                 ui.notice("当前为手动模式；[t] 检查一次，或在首页 [s] 安装定时任务。", "warning")
             ui.actions([

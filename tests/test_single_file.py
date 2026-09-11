@@ -13,7 +13,7 @@ from autocd import __version__
 from autocd.config import AutoCDError
 from autocd.paths import Paths
 from autocd.service import install, installed, start, stop, sync_project, uninstall
-from autocd.runner import open_state
+from autocd.state import State
 from autocd.units import project_units, service, worker_units
 
 
@@ -95,7 +95,7 @@ class SingleFileTests(unittest.TestCase):
             artifact = root / "download.py"
             artifact.write_text("# standalone program\n")
             repo = support.Repository(root)
-            with open_state(paths) as state:
+            with State.open(paths) as state:
                 row = state.register(repo.project)
                 state.update(row["id"], enabled=1)
             with (patch("autocd.service.unit_dir", return_value=root / "units"),
@@ -117,7 +117,7 @@ class SingleFileTests(unittest.TestCase):
                 uninstall(paths)
                 self.assertFalse(paths.installation.exists())
                 self.assertEqual(list((root / "units").iterdir()), [])
-                with open_state(paths) as state:
+                with State.open(paths) as state:
                     self.assertTrue(state.project(row["id"])["enabled"])
 
     def test_partial_timer_start_failure_keeps_schedule_disabled(self):
@@ -135,13 +135,44 @@ class SingleFileTests(unittest.TestCase):
 
                 def fail_enable(*args, **kwargs):
                     if args[0] == "enable":
+                        self.assertTrue(installed(paths)["active"])
                         raise AutoCDError("simulated timer failure")
 
                 control.side_effect = fail_enable
-                with self.assertRaises(AutoCDError):
-                    start(paths)
-                self.assertFalse(installed(paths)["active"])
-                self.assertEqual(control.call_args.args[:2], ("disable", "--now"))
+                for action in (start, install):
+                    with self.subTest(action=action.__name__), self.assertRaises(AutoCDError):
+                        action(paths)
+                    self.assertFalse(installed(paths)["active"])
+                    self.assertEqual(control.call_args.args[:2], ("disable", "--now"))
+
+    def test_invalid_config_keeps_retry_timer_and_recovers_after_edit(self):
+        with tempfile.TemporaryDirectory(prefix="autocd-retry-") as directory:
+            root = Path(directory)
+            paths = Paths(root / "state")
+            artifact = root / "download.py"
+            artifact.write_text("# standalone program\n")
+            repo = support.Repository(root)
+            config = repo.project / ".autocd.sh"
+            config.write_text("invalid config\n")
+            with State.open(paths) as state:
+                row = state.register(repo.project)
+                state.update(row["id"], enabled=1)
+            with (patch("autocd.service.unit_dir", return_value=root / "units"),
+                  patch.object(sys, "_autocd_artifact", str(artifact), create=True),
+                  patch("autocd.service.control"), patch("builtins.print")):
+                install(paths)
+                timer = root / "units" / f"{installed(paths)['prefix']}-{row['id']}.timer"
+                self.assertIn("OnUnitInactiveSec=30.000000s", timer.read_text())
+                repo.configure("echo repaired\n", interval=2)
+                sync_project(paths, row)
+                self.assertIn("OnUnitInactiveSec=120.000000s", timer.read_text())
+                config.unlink()
+                sync_project(paths, row)
+                self.assertIn("OnUnitInactiveSec=30.000000s", timer.read_text())
+                stop(paths)
+                start(paths)
+                self.assertIn("OnUnitInactiveSec=30.000000s", timer.read_text())
+                self.assertTrue(installed(paths)["active"])
 
     @unittest.skipUnless(shutil.which("systemd-analyze"), "systemd-analyze not available")
     def test_systemd_accepts_generated_units(self):

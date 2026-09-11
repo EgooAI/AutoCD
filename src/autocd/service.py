@@ -10,8 +10,8 @@ import sys
 from . import __version__, ui
 from .config import AutoCDError, atomic_write, read
 from .locks import file_lock
-from .runner import open_state
-from .units import MARKER, environment_path, project_units, worker_units
+from .state import State
+from .units import MARKER, project_units, worker_units
 
 
 def control(*args, check=True):
@@ -68,15 +68,20 @@ def write_units(files):
     return changed
 
 
+def configured_project_units(manifest, paths, row):
+    try:
+        interval = read(row["path"]).interval
+    except AutoCDError:
+        # Retry invalid configs so fixing the file resumes observation.
+        interval = 30
+    return project_units(manifest, paths, row, interval)
+
+
 def configured_units(manifest, paths, rows):
     files = worker_units(manifest, paths)
     for row in rows:
         if row["enabled"]:
-            try:
-                interval = read(row["path"]).interval
-            except AutoCDError:
-                interval = 30
-            files.update(project_units(manifest, paths, row, interval))
+            files.update(configured_project_units(manifest, paths, row))
     return files
 
 
@@ -87,17 +92,12 @@ def sync_project(paths, row):
         manifest = installed(paths)
         if manifest is None:
             return
-        with open_state(paths) as state:
+        with State.open(paths) as state:
             row = state.register(row["path"])
         name = f"{manifest['prefix']}-{row['id']}"
         timer = name + ".timer"
         if row["enabled"]:
-            try:
-                interval = read(row["path"]).interval
-            except AutoCDError:
-                # Keep trying a broken/missing config so fixing it resumes observation.
-                interval = 30
-            changed = write_units(project_units(manifest, paths, row, interval))
+            changed = write_units(configured_project_units(manifest, paths, row))
             if changed:
                 control("daemon-reload")
             if manifest["active"]:
@@ -137,6 +137,20 @@ def overview(paths):
             "program": manifest["program"], "prefix": manifest["prefix"], "timers": timers, "error": error}
 
 
+def activate(paths, manifest, files):
+    timers = [name for name in files if name.endswith(".timer")]
+    # Immediately fired checks must see an active installation.
+    manifest["active"] = True
+    write_manifest(paths, manifest)
+    try:
+        control("enable", "--now", *timers)
+    except AutoCDError:
+        manifest["active"] = False
+        write_manifest(paths, manifest)
+        control("disable", "--now", *timers, check=False)
+        raise
+
+
 def install(paths):
     artifact = getattr(sys, "_autocd_artifact", None)
     if not artifact:
@@ -144,7 +158,7 @@ def install(paths):
     control("show-environment")
     paths.prepare()
     with file_lock(paths.home / "run/schedule.lock", blocking=True):
-        with open_state(paths) as state:
+        with State.open(paths) as state:
             rows = state.all()
         existing = installed(paths)
         source = Path(artifact).read_bytes()
@@ -164,21 +178,12 @@ def install(paths):
             atomic_write(target, source.decode("utf-8"), 0o700)
         manifest = dict(schema=1, active=False, program=str(target), python=sys.executable,
                         prefix="autocd-" + hashlib.sha256(str(paths.home).encode()).hexdigest()[:12],
-                        path_env=environment_path())
+                        path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"))
         files = configured_units(manifest, paths, rows)
         write_units(files)
         control("daemon-reload")
         write_manifest(paths, manifest)
-        try:
-            # Set the switch first, so immediately fired checks see an active installation.
-            manifest["active"] = True
-            write_manifest(paths, manifest)
-            control("enable", "--now", *(name for name in files if name.endswith(".timer")))
-        except AutoCDError:
-            manifest["active"] = False
-            write_manifest(paths, manifest)
-            control("disable", "--now", *(name for name in files if name.endswith(".timer")), check=False)
-            raise
+        activate(paths, manifest, files)
     ui.notice(f"定时任务已安装；空闲时无需 AutoCD 进程。程序副本：{target}", "success")
     if os.getuid() != 0:
         ui.notice("注销后及开机自动执行需要管理员启用：loginctl enable-linger <用户名>。")
@@ -193,7 +198,7 @@ def stop(paths):
         manifest["active"] = False
         write_manifest(paths, manifest)
         timers = sorted(path.name for path in unit_dir().glob(manifest["prefix"] + "-*.timer"))
-        with open_state(paths) as state:
+        with State.open(paths) as state:
             for row in state.all():
                 state.reset_window(row["id"], include_manual=True)
         if timers:
@@ -208,20 +213,12 @@ def start(paths):
     control("show-environment")
     with file_lock(paths.home / "run/schedule.lock", blocking=True):
         manifest = installed(paths)
-        with open_state(paths) as state:
+        with State.open(paths) as state:
             rows = state.all()
         files = configured_units(manifest, paths, rows)
         if write_units(files):
             control("daemon-reload")
-        manifest["active"] = True
-        write_manifest(paths, manifest)
-        try:
-            control("enable", "--now", *(name for name in files if name.endswith(".timer")))
-        except AutoCDError:
-            manifest["active"] = False
-            write_manifest(paths, manifest)
-            control("disable", "--now", *(name for name in files if name.endswith(".timer")), check=False)
-            raise
+        activate(paths, manifest, files)
     ui.notice("定时任务已开启；各项目按配置的间隔检查。", "success")
 
 

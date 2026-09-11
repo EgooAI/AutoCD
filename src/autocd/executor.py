@@ -9,7 +9,7 @@ from .git import CandidateChanged, checkout, remote_sha
 from .process import check_bash, run
 
 
-async def deploy(state, paths, job_id, lock_fd=None, still_ready=lambda: True):
+async def deploy(state, paths, job_id, pass_fds=(), still_ready=lambda: True):
     project = state.project(state.job(job_id)["project_id"])
     try:
         project_lock = os.open(project["path"], os.O_RDONLY | os.O_DIRECTORY)
@@ -24,13 +24,12 @@ async def deploy(state, paths, job_id, lock_fd=None, still_ready=lambda: True):
         except BlockingIOError:
             state.finish(job_id, "failed", "另一个 AutoCD 实例正在部署此项目；完成后可手动重试。")
             return
-        inherited = (project_lock,) if lock_fd is None else ((*lock_fd, project_lock) if isinstance(lock_fd, tuple) else (lock_fd, project_lock))
-        await _deploy(state, paths, job_id, inherited, still_ready)
+        await _deploy(state, paths, job_id, (*pass_fds, project_lock), still_ready)
     finally:
         os.close(project_lock)
 
 
-async def _deploy(state, paths, job_id, lock_fd, still_ready):
+async def _deploy(state, paths, job_id, pass_fds, still_ready):
     job = state.job(job_id)
     project = state.project(job["project_id"])
     script_started = False
@@ -41,19 +40,19 @@ async def _deploy(state, paths, job_id, lock_fd, still_ready):
         config = read(project["path"])
         if config.fingerprint != job["fingerprint"]:
             raise CandidateChanged("排队期间配置发生变化，重新开始观察。")
-        await check_bash(config.script, lock_fd)
+        await check_bash(config.script, pass_fds)
 
         async def execute():
             nonlocal script_started
-            if await remote_sha(config, project["path"], lock_fd) != job["sha"]:
+            if await remote_sha(config, project["path"], pass_fds) != job["sha"]:
                 raise CandidateChanged("排队期间远程分支发生变化，重新开始观察。")
             release = await checkout(config, project["path"], job["sha"], paths,
-                                     project["id"], job_id, lock_fd)
+                                     project["id"], job_id, pass_fds)
             state.release(job_id, release)
             snapshot = paths.home / "logs" / f"{job_id}.sh"
             atomic_write(snapshot, config.script)
             if (read(project["path"]).fingerprint != config.fingerprint
-                    or await remote_sha(config, project["path"], lock_fd) != job["sha"]):
+                    or await remote_sha(config, project["path"], pass_fds) != job["sha"]):
                 raise CandidateChanged("准备期间配置或远程分支发生变化，重新开始观察。")
             current = state.project(project["id"])
             if not still_ready() or (not job["manual"] and not current["enabled"]):
@@ -70,7 +69,7 @@ async def _deploy(state, paths, job_id, lock_fd, still_ready):
                 log.write(f"AutoCD deployment {job_id} / {job['sha']}\n".encode())
                 script_started = True
                 code, _ = await run(["bash", "--noprofile", "--norc", snapshot], cwd=release,
-                                    env=env, output=log, timeout=config.timeout, lock_fd=lock_fd)
+                                    env=env, output=log, timeout=config.timeout, pass_fds=pass_fds)
             if code:
                 raise AutoCDError(f"部署命令退出码为 {code}；查看本次部署日志。")
 

@@ -1,7 +1,6 @@
 """Finite invocations: observe once, or drain a snapshot of queued deployments."""
 
 import asyncio
-from contextlib import contextmanager
 from pathlib import Path
 import signal
 import time
@@ -12,14 +11,8 @@ from .git import remote_sha
 from .locks import file_lock
 from .process import check_bash
 from .scheduler import boot_id, clock, from_project, ready
+from .service import installed
 from .state import State
-
-
-@contextmanager
-def open_state(paths):
-    paths.prepare()
-    with State(paths.database) as state:
-        yield state
 
 
 def recover_if_idle(state, paths):
@@ -32,10 +25,10 @@ def recover_if_idle(state, paths):
 
 async def set_enabled(paths, project, enabled):
     project = Path(project).expanduser().resolve()
-    with open_state(paths) as state:
+    with State.open(paths) as state:
         recover_if_idle(state, paths)
         if enabled:
-            await check_bash(read(project).script, state.legacy_fd)
+            await check_bash(read(project).script, state.lock_fds)
         row = state.register(project)
         with state.transaction():
             row = state.project(row["id"])
@@ -73,11 +66,10 @@ def record_observation(state, row, config, sha):
 
 async def observe(paths, *, path=None, ident=None, scheduled=False):
     if scheduled:
-        from .service import installed
         manifest = installed(paths)
         if not manifest or not manifest["active"]:
             return {"skipped": "schedule_stopped"}
-    with open_state(paths) as state:
+    with State.open(paths) as state:
         recover_if_idle(state, paths)
         if path is not None:
             row = state.register(Path(path).expanduser().resolve())
@@ -89,7 +81,7 @@ async def observe(paths, *, path=None, ident=None, scheduled=False):
         with file_lock(lock_path) as lock:
             if lock is None:
                 return {"project_id": row["id"], "skipped": "check_running"}
-            inherited = tuple(fd for fd in (lock, state.legacy_fd) if fd is not None)
+            inherited = (lock, *state.lock_fds)
             try:
                 config = read(row["path"])
                 if config.fingerprint != row["fingerprint"]:
@@ -109,7 +101,7 @@ async def observe(paths, *, path=None, ident=None, scheduled=False):
 async def tick(paths, path=None):
     if path:
         return [await observe(paths, path=path)]
-    with open_state(paths) as state:
+    with State.open(paths) as state:
         ids = [row["id"] for row in state.all() if row["enabled"]]
     # Checks are independent; one slow remote never holds a database write transaction.
     return await asyncio.gather(*(observe(paths, ident=ident) for ident in ids))
@@ -117,14 +109,14 @@ async def tick(paths, path=None):
 
 async def enqueue_manual(paths, path):
     path = Path(path).expanduser().resolve()
-    with open_state(paths) as state:
+    with State.open(paths) as state:
         recover_if_idle(state, paths)
         row = state.register(path)
         if row["needs_review"]:
             raise AutoCDError("先核实中断任务并使用 resolve 标记结果。")
         config = read(path)
-        await check_bash(config.script, state.legacy_fd)
-        sha = await remote_sha(config, path, state.legacy_fd)
+        await check_bash(config.script, state.lock_fds)
+        sha = await remote_sha(config, path, state.lock_fds)
         if read(path).fingerprint != config.fingerprint:
             raise AutoCDError("查询期间配置已修改；请重新发起部署。")
         with state.transaction():
@@ -145,17 +137,16 @@ def still_ready(state, job):
 
 
 async def worker(paths, scheduled=False):
-    with open_state(paths) as state, file_lock(paths.worker_lock) as lock:
+    with State.open(paths) as state, file_lock(paths.worker_lock) as lock:
         if lock is None:
             return {"busy": True, "deployments": []}
         state.recover()
         # Bound this invocation to a snapshot: new jobs can wake the next invocation.
         pending = state.queued()
         completed = []
-        inherited = tuple(fd for fd in (lock, state.legacy_fd) if fd is not None)
+        inherited = (lock, *state.lock_fds)
         for job_id in pending:
             if scheduled:
-                from .service import installed
                 manifest = installed(paths)
                 if not manifest or not manifest["active"]:
                     break

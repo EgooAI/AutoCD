@@ -2,17 +2,17 @@
 
 Egooai 的轻量持续部署工具。扫描当前目录及其直接子目录中的 `.autocd.sh`，交互选择监视项目；当指定远程分支连续保持同一提交达到冷静间隔后，检出该提交并运行部署脚本。
 
-## 交付方式
+## 下载与启动
 
-最终发布一个独立的 `autocd.py`，仅依赖 Linux、Python 3.11+、Git 2.29+ 和 Bash，无 Python 第三方包或 AutoCD 常驻进程。systemd 定期唤起短任务，检查或部署完成即退出；跨次调用的状态保存在 SQLite。
+AutoCD 是独立的 `autocd.py` 脚本，运行需要 Linux、Python 3.11+、Git 2.29+ 和 Bash，自动调度需要 systemd。无需安装 Python 第三方包，也无需保持终端开启。
 
-首个 Release 发布后，可在项目父目录一行下载并启动：
+在项目父目录下载并启动：
 
 ```bash
 (autocd_tmp="$(mktemp)" && trap 'rm -f "$autocd_tmp"' EXIT && curl -fsSL https://github.com/Egooai/AutoCD/releases/latest/download/autocd.py -o "$autocd_tmp" && python3 "$autocd_tmp")
 ```
 
-脚本完整下载后才运行，终端输入仍用于菜单。安装定时任务时保存独立程序副本，临时文件删除不影响后续执行。Release 只通过 GitHub Actions 手动触发发布。
+安装定时任务时会保存程序副本，临时下载文件删除后仍可自动检查和部署。
 
 ## 本地运行
 
@@ -21,9 +21,9 @@ python3 tools/build_single.py
 python3 dist/autocd.py
 ```
 
-无参数进入中文菜单，扫描当前目录和直接子目录。先创建配置并填写部署命令，再安装定时任务、选择项目开启监视。默认模板以失败退出，防止空命令被记录为部署成功。
+无参数进入中文菜单。先创建配置并填写部署命令，再安装定时任务、选择项目开启监视。默认模板以失败退出，需替换为实际部署命令。
 
-菜单以边框区分状态和操作，输入方括号内的快捷键；Enter 刷新，操作结果确认后返回菜单。颜色由终端 ANSI 支持提供，无额外依赖；设置 `NO_COLOR=1`、使用 `TERM=dumb` 或重定向输出时自动关闭。JSON 输出保持纯文本。
+输入方括号内的快捷键操作，Enter 刷新。设置 `NO_COLOR=1` 可关闭颜色；`TERM=dumb` 或重定向输出时自动关闭。
 
 ```bash
 python3 dist/autocd.py config create /path/to/project
@@ -34,27 +34,6 @@ python3 dist/autocd.py status
 ```
 
 普通用户安装 systemd 用户级定时任务，管理员需执行 `loginctl enable-linger <用户名>` 以保证注销后及开机执行。root 安装系统级任务。程序继承安装时的 PATH；Git 凭据、构建工具与部署权限属于运行用户。更新程序需显式重新执行 `schedule install`，数据保留。
-
-### 无真实服务的人工测试
-
-```bash
-python3 tools/demo.py setup
-```
-
-演示项目只使用本地 Git 仓库，并向演示目录写入结果文件。监视间隔 3 秒、冷静间隔 9 秒，不构建或重启真实服务。无需启动后台：
-
-```bash
-# 菜单中选择 Demo，按 e 纳入检查，再每隔约 3 秒按 t 单次检查
-python3 dist/autocd.py --home .sandbox/demo/state --root .sandbox/demo/projects
-
-# 发布演示项目的下一个提交，重新开始观察
-python3 tools/demo.py update
-
-# 有限次测试：每轮启动独立进程，验证冷静窗口和部署后退出
-python3 tools/demo.py verify
-```
-
-部署成功后查看 `.sandbox/demo/projects/Demo/deployed.txt`、菜单历史和日志。手动模式需要持续按间隔检查：若两次检查相隔超过 8.5 秒，Demo 的窗口会重新计时。正式服务器安装定时任务后自动检查。
 
 ### 常用命令
 
@@ -101,30 +80,10 @@ printf 'Deploying %s (previous: %s)\n' "$DEPLOY_SHA" "$PREVIOUS_SHA"
 
 ## 行为边界
 
-- SQLite 保存监视开关、候选提交、冷静窗口和部署历史。正常进程退出不重置窗口；网络错误、观察断档、配置变化或系统重启后重新计时。
+- 监视设置、冷静窗口和部署历史会持久保存。正常进程退出不重置窗口；网络错误、观察断档、配置变化或系统重启后重新计时。
 - 各项目由独立定时任务检查，部署全局串行。检查与部署互不阻塞；执行时固定提交和脚本快照。
 - 在独立发布目录执行，不修改原项目工作区。脚本接收 `DEPLOY_SHA`、`PREVIOUS_SHA`、`RELEASE_DIR`。
 - 同一版本失败后不自动反复重试；异常中断的部署需人工核实。脚本负责健康检查和回滚，退出码决定结果。
-- 暂不提供更新公告 API、Web 面板、数据库管理或自动删除历史发布目录。
+- 历史发布目录需自行清理。
 
-## 仓库结构
-
-```text
-src/autocd/         配置、交互、调度、状态、Git 和进程执行
-tools/             构建独立脚本
-tests/             单元测试及本地 Git 集成测试
-examples/          项目配置示例
-docs/              状态与运行约定
-.github/workflows/ CI 与手动发布
-dist/autocd.py     构建产物，不纳入版本控制
-```
-
-开发源码保持模块化，发布产物包含全部程序代码及模板，运行时不再下载组件。
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-测试使用临时目录、本地 bare Git 仓库和独立脚本短进程，不依赖线上服务。[运行约定](docs/design.md) 记录定时任务、并发状态与异常恢复边界。
-
-发布时先同步 `pyproject.toml` 与 `src/autocd/__init__.py` 的版本，再在 GitHub Actions → Release → Run workflow 选择 `main`、输入对应 `vX.Y.Z`。通过构建和测试后发布 `autocd.py` 与 `SHA256SUMS`；推送分支或标签均不会发布。已有标签不覆盖。
+可通过[模拟测试](docs/Demo.md) 体验完整部署流程；定时任务、数据目录和异常恢复说明见[运行约定](docs/Design.md)。

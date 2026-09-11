@@ -1,7 +1,5 @@
 """systemd templates embedded in the standalone distribution."""
 
-import os
-
 from .config import AutoCDError
 
 
@@ -65,7 +63,3 @@ def project_units(manifest, paths, row, interval):
     name = manifest["prefix"] + "-" + row["id"]
     return {name + ".service": service(manifest, paths, ["observe", "--id", row["id"], "--scheduled"], timeout="75s"),
             name + ".timer": timer(name + ".service", interval)}
-
-
-def environment_path():
-    return os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")

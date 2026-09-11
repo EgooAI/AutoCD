@@ -5,7 +5,8 @@ import unittest
 import support  # noqa: F401 -- install the source path for stdlib unittest discovery
 from autocd.config import AutoCDError, atomic_write, parse, read, render
 from autocd.discovery import discover
-from autocd.operations import save_config, terminal_text
+from autocd.operations import save_config
+from autocd.ui import terminal_text
 
 
 class ConfigTests(unittest.TestCase):

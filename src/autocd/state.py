@@ -29,21 +29,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_active_job ON deployments(project_id)
 
 
 class State:
+    @classmethod
+    def open(cls, paths):
+        paths.prepare()
+        return cls(paths.database)
+
     def __init__(self, path, readonly=False):
         path = Path(path).resolve()
         self.guard = None
         self.db = None
+        self.lock_fds = ()
         try:
             if not readonly:
                 (path.parent / "run").mkdir(mode=0o700, exist_ok=True)
             guard_path = path.parent / "run/daemon.lock"
             if guard_path.parent.exists():
                 self.guard = file_lock(guard_path, shared=True)
-                self.legacy_fd = self.guard.__enter__()
-                if self.legacy_fd is None:
+                legacy_fd = self.guard.__enter__()
+                if legacy_fd is None:
                     raise AutoCDError("旧版 daemon 或其任务仍在运行；请先用旧脚本停止，再迁移状态。")
-            else:
-                self.legacy_fd = None
+                self.lock_fds = (legacy_fd,)
             self.db = sqlite3.connect(f"{path.as_uri()}?mode=ro" if readonly else path,
                                       uri=readonly, timeout=10, isolation_level=None)
             self.db.row_factory = sqlite3.Row

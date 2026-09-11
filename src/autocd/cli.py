@@ -9,10 +9,11 @@ from . import __version__, ui
 from .config import AutoCDError, read, render
 from .menu import menu
 from .operations import (call, check, delete_config, edit_in_editor, format_history, project_rows,
-                         save_config, show_rows, status, terminal_text, wake_worker, wizard)
+                         save_config, show_rows, status, wake_worker, wizard)
 from .paths import Paths
-from .runner import interruptible, observe, open_state, recover_if_idle, worker
+from .runner import interruptible, observe, recover_if_idle, worker
 from .service import manage, sync_project
+from .state import State
 
 
 def parser():
@@ -79,7 +80,7 @@ def main(argv=None):
                 raise AutoCDError("交互菜单需要终端；非交互运行请指定 list/status 等子命令。")
             menu(paths, args.root.resolve())
         elif args.command == "migrate":
-            with open_state(paths) as state:
+            with State.open(paths) as state:
                 recover_if_idle(state, paths)
             ui.notice("状态已迁移，监视开关与历史保留。", "success")
         elif args.command in {"tick", "run-once"}:
@@ -90,7 +91,7 @@ def main(argv=None):
         elif args.command == "observe":
             result = asyncio.run(interruptible(observe(paths, ident=args.id, scheduled=args.scheduled)))
             if "project_id" in result:
-                with open_state(paths) as state:
+                with State.open(paths) as state:
                     row = state.project(result["project_id"])
                 sync_project(paths, row)
                 wake_worker(paths)
@@ -118,7 +119,7 @@ def main(argv=None):
             rows = call(paths, "history", path=str(args.path.resolve()) if args.path else None)
             print(json.dumps(rows, ensure_ascii=False, indent=2)) if args.json else format_history(rows)
         elif args.command == "logs":
-            print(terminal_text(call(paths, "logs", job_id=args.job_id)))
+            print(ui.terminal_text(call(paths, "logs", job_id=args.job_id)))
         elif args.command == "resolve":
             print(json.dumps(call(paths, "resolve", path=str(args.path.resolve()), outcome=args.outcome), ensure_ascii=False))
         elif args.command == "schedule":
@@ -140,7 +141,7 @@ def main(argv=None):
             else:
                 delete_config(paths, args.path)
             if args.action == "edit":
-                with open_state(paths) as state:
+                with State.open(paths) as state:
                     row = state.register(args.path)
                 sync_project(paths, row)
         return 0
