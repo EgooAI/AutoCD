@@ -1,0 +1,70 @@
+name: Release
+
+# Publishing is deliberately available ONLY through a manual dispatch.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag matching the committed version, e.g. v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autocd-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Validate the requested release
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import tomllib
+
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag):
+              raise SystemExit('Use a stable release tag such as v0.1.0')
+          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          if tag != 'v' + version:
+              raise SystemExit('Tag must match the version committed in pyproject.toml')
+          PY
+      - name: Build and test the release artifact
+        run: |
+          python tools/build_single.py
+          python -m unittest discover -s tests -v
+          python -I dist/autocd.py --version
+          bash -n examples/.autocd.example.sh
+          cd dist
+          sha256sum --check SHA256SUMS
+      - name: Create the tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'The tag already exists; choose a new version. Existing releases are never overwritten.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" dist/autocd.py dist/SHA256SUMS \
+            --target "$GITHUB_SHA" --title "AutoCD $RELEASE_TAG" \
+            --generate-notes --latest
